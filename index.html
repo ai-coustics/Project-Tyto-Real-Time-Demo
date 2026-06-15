@@ -526,6 +526,28 @@
       text-transform: none
     }
 
+    .composite-formula.ts-loading,
+    .composite-formula.ts-warming {
+      color: var(--orange)
+    }
+
+    .composite-formula.ts-loading::before,
+    .composite-formula.ts-warming::before {
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--orange);
+      animation: pulse 1s infinite;
+      vertical-align: middle
+    }
+
+    .composite-formula.ts-error {
+      color: var(--red)
+    }
+
     .composite-val {
       font-size: 30px;
       font-weight: 700;
@@ -919,7 +941,7 @@
 
     <div class="composite">
       <div class="composite-head">
-        <span class="composite-label"><span class="composite-formula">higher = worse</span></span>
+        <span class="composite-label"><span class="composite-formula" id="tyto-state">higher = worse</span></span>
         <span class="composite-val" id="composite-val">–</span>
       </div>
       <div class="composite-bar">
@@ -1406,6 +1428,13 @@
 
     // ── UI helpers ─────────────────────────────────────────────────────────────────
     function setStatus(state, label) { $status.className = "badge " + state; $status.innerHTML = `<span class="dot"></span>${label}`; }
+    // Tyto's own lifecycle, shown under the score (separate from the call status):
+    // loading the model → warming up on first speech → scoring (or error).
+    function setTytoState(state, text) {
+      const el = $("tyto-state"); if (!el) return;
+      el.className = "composite-formula" + (state ? " ts-" + state : "");
+      el.textContent = text || "higher = worse";
+    }
     function colorFor(t) {
       if (t.startsWith("tyto.nudge") || t.startsWith("tool.")) return "t-orange";
       if (t.startsWith("tyto.aware")) return "t-purple";
@@ -1634,11 +1663,12 @@ registerProcessor("tap",Tap);`;
       envMonitor = new EnvMonitor(1, nudgeThreshold);
       workerScoring = true;
       tytoWorker = new Worker("tyto-worker.js", { type: "module" });
+      setTytoState("loading", "loading Tyto model…");
       tytoWorker.onmessage = (e) => {
         const m = e.data;
-        if (m.type === "ready") log("tyto.ready", { model: m.modelId, sdk: m.sdkVersion, window_s: TYTO_WINDOW_S, hop_s: TYTO_HOP_MS / 1000 });
+        if (m.type === "ready") { log("tyto.ready", { model: m.modelId, sdk: m.sdkVersion, window_s: TYTO_WINDOW_S, hop_s: TYTO_HOP_MS / 1000 }); setTytoState("warming", "warming up — keep talking"); }
         else if (m.type === "scores") onScores(m.scores, m.analyzeMs);
-        else if (m.type === "error") log("tyto.error", { message: m.message });
+        else if (m.type === "error") { log("tyto.error", { message: m.message }); setTytoState("error", "Tyto error — check your key"); }
       };
       tytoWorker.postMessage({
         type: "init", licenseKey: KEYS.license, modelUrl: TYTO_MODEL_URL,
@@ -1656,6 +1686,7 @@ registerProcessor("tap",Tap);`;
       tytoWorker.postMessage({ type: shouldScore ? "resume" : "pause" });
     }
     function onScores(raw, analyzeMs) {
+      if (!lastMetrics) setTytoState(null);   // first score in: Tyto is live
       emaMetrics = emaMetrics
         ? Object.fromEntries(Object.keys(raw).map(k => [k, SCORE_EMA_ALPHA * raw[k] + (1 - SCORE_EMA_ALPHA) * (emaMetrics[k] ?? raw[k])]))
         : { ...raw };
@@ -1777,8 +1808,8 @@ registerProcessor("tap",Tap);`;
       connected = false; $mic.classList.remove("live");
       listening = true; awaitingNudge = false; nudgeActive = false; nudgePlaybackPending = false;
       agentSpeaking = false; agentAudioPlaying = false;
-      lastRoomState = ""; lastVadProfile = "eager";
-      clearSeries();
+      lastRoomState = ""; lastVadProfile = "eager"; lastMetrics = null;
+      clearSeries(); setTytoState(null);
       if (tytoWorker) { try { tytoWorker.postMessage({ type: "stop" }); tytoWorker.terminate(); } catch { } tytoWorker = null; }
       emaMetrics = null; envMonitor = null; workerScoring = true;
       if (tapCtx) tapCtx.close().catch(() => { }); tapCtx = null;
