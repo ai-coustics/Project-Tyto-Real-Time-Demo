@@ -21,6 +21,7 @@ Three things you can run:
 | [examples/web/server.py](examples/web/server.py) | The full demo with the browser UI, same as the reference. Tyto scoring, the agent, and the keys all run on the Python backend; the browser is a thin client. | ai-coustics key + OpenAI key |
 | [examples/score_mic.py](examples/score_mic.py) | Live Tyto scoring of your mic in the terminal, with the three layer decisions printed. No agent. | ai-coustics key + a mic |
 | [examples/voice_agent.py](examples/voice_agent.py) | The full agent in the terminal (no UI), for headless or scripting use. | ai-coustics key + OpenAI key + headphones |
+| [examples/livekit/agent.py](examples/livekit/agent.py) | The same demo as a LiveKit agent worker: LiveKit transports the media and data channel, this worker is still the brain. Same browser UI, served by a small token server. | ai-coustics key + OpenAI key + LiveKit project |
 
 The web demo is the one to start with: it is the visual UI from the browser
 reference, but every key stays on the server and Tyto runs in Python.
@@ -43,6 +44,9 @@ split by job, mirroring the commented sections of the browser reference:
 - `openai_realtime.py` - `OpenAIRealtimeProvider`, the OpenAI Realtime WebSocket
   backend. Audio playback is delegated to a sink so the same provider drives a
   local speaker or a browser.
+- `livekit_provider.py` - `LiveKitProvider`, the same seam over a LiveKit
+  `AgentSession` (OpenAI Realtime). LiveKit owns the transport; the controller
+  and decision layers are unchanged. Used by [examples/livekit](examples/livekit).
 - `audio.py` - `SounddeviceSink`, local speaker playback for the terminal agent.
 
 ## Run it
@@ -68,6 +72,32 @@ uv run examples/score_mic.py
 uv pip install -e ".[agent]"
 uv run examples/voice_agent.py
 ```
+
+### LiveKit backend
+
+The same demo, but running as a LiveKit agent worker so LiveKit transports the
+media (browser mic and agent audio over WebRTC) and the data channel. The worker
+is still the whole brain: Tyto scoring, the three layers, and the keys all live
+in it. The browser is the same thin client UI, connected over the LiveKit JS SDK.
+
+You need a (free) LiveKit project from <https://cloud.livekit.io> for
+`LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` (or self-host). Put
+them in `.env.local` (LiveKit's convention) or `.env` alongside your other keys.
+
+```bash
+uv pip install -e ".[livekit]"
+
+# 1) the agent worker (the brain). No agent_name = it joins rooms automatically.
+uv run examples/livekit/agent.py dev
+
+# 2) in a second terminal, the token + UI server, then open http://localhost:8080
+uv run examples/livekit/token_server.py
+```
+
+The token server only mints LiveKit room tokens and serves the static UI; your
+OpenAI and ai-coustics keys never leave the agent worker. You can also talk to
+the worker with no frontend at all using LiveKit's Agent Console
+(`uv run examples/livekit/agent.py console`).
 
 Real exported environment variables take precedence over `.env`. Install extras:
 plain `.` for the mic scorer, `.[web]` for the browser demo, `.[agent]` for the
@@ -121,6 +151,16 @@ can ask "how do I sound?" at any time.
   package (model download, config, analyzer pair), and the web server boot plus
   websocket session bridge are smoke tested. The live audio path needs your own
   keys, a mic, and a browser to exercise.
+- **LiveKit backend specifics.** LiveKit transports the media natively, so unlike
+  the web/Pipecat demos there is no PCM relay: the browser publishes its mic and
+  plays the agent's track directly, and Tyto is fed from a server-side
+  `rtc.AudioStream` resampled to 24 kHz. The three layers map onto LiveKit's
+  session API (`Agent.update_instructions`, `RealtimeModel.update_options(turn_detection=...)`,
+  `AgentSession.interrupt()` + `generate_reply(instructions=...)`), and
+  `check_audio_quality` is a `@function_tool` on the agent. "Is the agent audible"
+  is derived from `agent_state_changed`. The LiveKit API was verified against the
+  installed `livekit-agents` (1.6) and the package imports without LiveKit present;
+  the live path was not exercised in the build environment (no LiveKit project/keys).
 
 ## Deploy story
 

@@ -16,8 +16,10 @@ dependencies = [
 agent = ["websockets>=13"]
 # The browser demo adds the web server.
 web = ["websockets>=13", "aiohttp>=3.9"]
+# The LiveKit backend: the agent worker plus the token/static server.
+livekit = ["livekit-agents[openai]~=1.0", "aiohttp>=3.9"]
 # Everything, plus the test runner.
-dev = ["websockets>=13", "aiohttp>=3.9", "pytest>=8"]
+dev = ["websockets>=13", "aiohttp>=3.9", "livekit-agents[openai]~=1.0", "pytest>=8"]
 
 [build-system]
 requires = ["hatchling"]

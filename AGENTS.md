@@ -57,6 +57,15 @@ worse) and six dimensions (`noise`, `speaker_reverb`, `speaker_loudness`,
   (mic capture, agent playback, render). Audio is relayed browser <-> backend
   <-> OpenAI; keys stay in the server env. The player (browser) owns
   `on_agent_audio`, reported back over the socket.
+- **examples/livekit/** - the same UI over LiveKit. `agent.py` is a LiveKit agent
+  worker (the brain), `token_server.py` (aiohttp) mints room tokens and serves the
+  static UI, and `app.js` is the same renderer with the transport swapped to the
+  LiveKit JS SDK. LiveKit carries the media natively (no PCM relay); UI messages
+  go over the room data channel (topic `tyto`). The mic is tapped server-side via
+  `rtc.AudioStream` into the scorer. `on_agent_audio` is derived from
+  `agent_state_changed` (LiveKit plays the agent audio in the browser, so there is
+  no local sink to report it). The `LiveKitProvider` is the only LiveKit-specific
+  file in the library.
 
 ### Who owns "agent audible" (on_agent_audio)
 
@@ -139,6 +148,30 @@ confirmed to work; only the licensed analysis steps need a real key.
 | tool call | `response.function_call_arguments.done` |
 | nudge | `response.create` with `metadata.tyto_purpose = "nudge"` |
 | interrupt | `response.cancel` (and clear the local playback buffer) |
+
+## LiveKit session mapping (livekit-agents 1.6, verified against the installed package)
+
+The `LiveKitProvider` drives an `AgentSession` with `openai.realtime.RealtimeModel`.
+The seam maps onto the session API rather than raw protocol envelopes:
+
+| Concept | LiveKit call / event |
+| --- | --- |
+| configure session | `RealtimeModel(voice=, turn_detection=)` + `AgentSession(llm=...)` |
+| Aware (instructions) | `Agent.update_instructions(text)` |
+| Tuned (turn detection) | `RealtimeModel.update_options(turn_detection=...)`; `None` disables server VAD (the listen gate) |
+| mic gate | `AgentSession.input.set_audio_enabled(on)` |
+| interrupt | `AgentSession.interrupt()` (+ `clear_user_turn()` to clear input) |
+| nudge / greeting | `AgentSession.generate_reply(instructions=...)`; the returned `SpeechHandle` identity tags the nudge |
+| agent speaking | `speech_created` event + `SpeechHandle.add_done_callback` (cancelled = `handle.interrupted`) |
+| agent audible | `agent_state_changed` (`new_state == "speaking"`) |
+| user text | `user_input_transcribed` (`transcript`, `is_final`) |
+| agent text | `conversation_item_added` (role `assistant`, `item.text_content`) |
+| tool call | `@function_tool check_audio_quality` on the agent (so `on_tool_call`/`send_tool_result` are unused) |
+| UI to browser | `room.local_participant.publish_data(json, topic="tyto")`; browser -> agent via `data_received` |
+
+Dispatch is automatic (no `agent_name` on `@server.rtc_session`), so the worker
+joins any room a visitor's token grants. The mic is tapped via
+`rtc.AudioStream(track, sample_rate=24000, num_channels=1)`.
 
 ## Running and verifying
 
