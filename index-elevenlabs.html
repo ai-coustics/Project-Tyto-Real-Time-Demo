@@ -1,0 +1,1863 @@
+<!doctype html>
+<!--
+  Tyto demo · ElevenLabs edition.
+
+  Same self-contained browser demo as index.html, but the voice agent is an
+  ElevenLabs Conversational AI agent instead of OpenAI Realtime. Tyto scoring and
+  the three adaptation layers are unchanged; only the voice provider was swapped
+  (see the ElevenLabsProvider class). No backend, no build step.
+
+  One-time setup (https://elevenlabs.io/app/agents):
+    1. Create an agent and make it PUBLIC (Security → Enable "Public agent").
+    2. Security → enable "Overrides" for System prompt and First message
+       (the demo pushes the Tyto prompt + opening line at connect time).
+    3. Add a client tool named exactly  check_audio_quality  (no parameters).
+       Its browser-side implementation lives in this file.
+    4. Pick a voice. Copy the agent ID (agent_…).
+  Then open this page, click "Enter keys", paste the agent ID + your ai-coustics
+  license, and click the mic.
+
+  Known gaps vs the OpenAI version (ElevenLabs runs the conversation server-side):
+    · Tuned layer: turn-taking is managed by ElevenLabs and not retuned at runtime.
+    · Reactive layer: the nudge is sent as a contextual hint, not a forced
+      verbatim interrupt.
+-->
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tyto — Audio Insights</title>
+  <style>
+    :root {
+      --color-bg: #0F0F0F;
+      --color-panel: #1A1919;
+      --color-text-pri: #F9F9F9;
+      --color-text-sec: #DEDEDE;
+      --color-text-ter: #666666;
+      --color-border: #333333;
+      --color-accent: #6993FF;
+      --color-glow: #006FFF;
+      --green: #00BFA6;
+      --orange: #F4B942;
+      --blue: #6993FF;
+      --red: #E28C7C;
+      --font-display: "Milling", "Inter", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--color-bg)
+    }
+
+    body {
+      font-family: var(--font-display);
+      color: var(--color-text-pri);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased
+    }
+
+    .glow {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 0
+    }
+
+    .glow::before {
+      content: "";
+      position: absolute;
+      left: 40%;
+      top: -200px;
+      width: 1100px;
+      height: 800px;
+      background: radial-gradient(ellipse, var(--color-glow) 0%, transparent 70%);
+      filter: blur(100px);
+      opacity: 0.14
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 24px 28px 48px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh
+    }
+
+    .topbar {
+      position: relative;
+      z-index: 1;
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 18px 28px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between
+    }
+
+    .topbar .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      font-family: var(--font-display);
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--color-text-pri);
+      text-decoration: none
+    }
+
+    .topbar .brand .mark {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--color-accent);
+      box-shadow: 0 0 12px var(--color-glow)
+    }
+
+    .topbar .brand .sub {
+      color: var(--color-text-ter);
+      font-weight: 400
+    }
+
+    .topbar nav {
+      display: inline-flex;
+      align-items: center;
+      gap: 20px
+    }
+
+    .topbar nav a {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--color-text-ter);
+      text-decoration: none;
+      transition: color .15s ease
+    }
+
+    .topbar nav a:hover {
+      color: var(--color-text-pri)
+    }
+
+    .nav-btn {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--color-bg);
+      background: var(--color-accent);
+      border: 0;
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      transition: filter .15s ease
+    }
+
+    .nav-btn:hover {
+      filter: brightness(1.08)
+    }
+
+    .nav-btn.set {
+      color: var(--green);
+      background: transparent;
+      border: 1px solid var(--color-border)
+    }
+
+    .gate {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(8, 8, 10, .72);
+      backdrop-filter: blur(6px)
+    }
+
+    .gate.visible {
+      display: flex
+    }
+
+    .gate-card {
+      width: 100%;
+      max-width: 440px;
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 14px;
+      padding: 24px
+    }
+
+    .gate-card h2 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      font-weight: 600
+    }
+
+    .gate-sub {
+      margin: 0 0 18px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--color-text-ter)
+    }
+
+    .gate-field {
+      display: block;
+      margin-bottom: 14px
+    }
+
+    .gate-field>span {
+      display: block;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--color-text-sec);
+      margin-bottom: 6px
+    }
+
+    .gate-field input {
+      width: 100%;
+      box-sizing: border-box;
+      background: #0a0a0d;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--color-text-pri);
+      font-family: var(--font-mono);
+      font-size: 13px
+    }
+
+    .gate-field input:focus {
+      outline: none;
+      border-color: var(--color-accent)
+    }
+
+    .gate-field a {
+      display: inline-block;
+      margin-top: 6px;
+      font-size: 10px;
+      color: var(--color-accent);
+      text-decoration: none
+    }
+
+    .gate-err {
+      min-height: 16px;
+      font-size: 11px;
+      color: var(--red);
+      margin-bottom: 8px
+    }
+
+    .gate-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px
+    }
+
+    .gate-btn {
+      font-size: 12px;
+      border-radius: 8px;
+      padding: 9px 16px;
+      cursor: pointer;
+      border: 1px solid var(--color-border)
+    }
+
+    .gate-btn.ghost {
+      background: transparent;
+      color: var(--color-text-sec)
+    }
+
+    .gate-btn.primary {
+      background: var(--color-accent);
+      border-color: var(--color-accent);
+      color: var(--color-bg);
+      font-weight: 600
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      color: var(--color-text-ter);
+      transition: all .3s
+    }
+
+    .badge .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--color-text-ter);
+      transition: all .3s
+    }
+
+    .badge.connecting {
+      color: var(--orange);
+      border-color: rgba(244, 185, 66, .35)
+    }
+
+    .badge.connecting .dot {
+      background: var(--orange);
+      animation: pulse 1s infinite
+    }
+
+    .badge.live {
+      color: var(--green);
+      border-color: rgba(0, 191, 166, .4);
+      background: rgba(0, 191, 166, .06)
+    }
+
+    .badge.live .dot {
+      background: var(--green);
+      box-shadow: 0 0 12px var(--green)
+    }
+
+    .badge.error {
+      color: var(--red);
+      border-color: rgba(226, 140, 124, .4)
+    }
+
+    .badge.error .dot {
+      background: var(--red)
+    }
+
+    #status {
+      margin-top: 18px
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 18px;
+      flex-wrap: wrap;
+      justify-content: center
+    }
+
+    .mic-wrap {
+      margin: 18px 0 20px;
+      width: 120px;
+      height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative
+    }
+
+    .mic {
+      width: 96px;
+      height: 96px;
+      border-radius: 999px;
+      border: none;
+      cursor: pointer;
+      background: var(--color-accent);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 32px rgba(105, 147, 255, .35);
+      transition: transform .2s, box-shadow .3s
+    }
+
+    .mic:hover {
+      transform: scale(1.04)
+    }
+
+    .mic:active {
+      transform: scale(.97)
+    }
+
+    .mic svg {
+      width: 34px;
+      height: 34px
+    }
+
+    .mic.live {
+      box-shadow: 0 8px 48px rgba(105, 147, 255, .6);
+      animation: pulse-btn 2s infinite
+    }
+
+    .mic.live::before {
+      content: "";
+      position: absolute;
+      inset: 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(105, 147, 255, .6);
+      animation: ring 2s infinite
+    }
+
+    @keyframes pulse-btn {
+
+      0%,
+      100% {
+        box-shadow: 0 8px 32px rgba(105, 147, 255, .4)
+      }
+
+      50% {
+        box-shadow: 0 8px 56px rgba(105, 147, 255, .75)
+      }
+    }
+
+    @keyframes ring {
+      0% {
+        transform: scale(.95);
+        opacity: 1
+      }
+
+      100% {
+        transform: scale(1.35);
+        opacity: 0
+      }
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1
+      }
+
+      50% {
+        opacity: .4
+      }
+    }
+
+    .banner {
+      display: none;
+      width: 100%;
+      padding: 11px 16px;
+      background: rgba(244, 185, 66, .12);
+      border: 1px solid rgba(244, 185, 66, .45);
+      border-radius: 10px;
+      color: var(--orange);
+      font-size: 13px;
+      text-align: center;
+      margin-bottom: 16px;
+      font-weight: 600
+    }
+
+    .banner.visible {
+      display: block;
+      animation: pulse 1.4s ease-in-out 2
+    }
+
+    .layers {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      width: 100%;
+      margin-bottom: 14px
+    }
+
+    .layer {
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-height: 62px
+    }
+
+    .layer .l-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline
+    }
+
+    .layer .l-name {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--color-text-ter)
+    }
+
+    .layer .l-pill {
+      font-size: 10px;
+      font-family: var(--font-mono);
+      color: var(--color-text-sec)
+    }
+
+    .layer .l-val {
+      font-size: 13px;
+      color: var(--color-text-sec);
+      line-height: 1.4
+    }
+
+    .layer.eager .l-pill {
+      color: var(--green)
+    }
+
+    .layer.patient .l-pill {
+      color: var(--orange)
+    }
+
+    .composite {
+      width: 100%;
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 12px
+    }
+
+    .composite-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 8px
+    }
+
+    .composite-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--color-text-sec)
+    }
+
+    .composite-formula {
+      display: block;
+      font-size: 9px;
+      font-weight: 400;
+      letter-spacing: .3px;
+      color: var(--color-text-ter);
+      margin-top: 2px;
+      text-transform: none
+    }
+
+    .composite-formula.ts-loading,
+    .composite-formula.ts-warming {
+      color: var(--orange)
+    }
+
+    .composite-formula.ts-loading::before,
+    .composite-formula.ts-warming::before {
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 6px;
+      border-radius: 50%;
+      background: var(--orange);
+      animation: pulse 1s infinite;
+      vertical-align: middle
+    }
+
+    .composite-formula.ts-error {
+      color: var(--red)
+    }
+
+    .composite-val {
+      font-size: 30px;
+      font-weight: 700;
+      font-family: var(--font-mono)
+    }
+
+    .composite-bar {
+      position: relative;
+      height: 12px;
+      border-radius: 6px;
+      background: #0a0a0d;
+      overflow: hidden
+    }
+
+    .composite-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+      transition: width .4s, background .4s
+    }
+
+    .composite-fill.green {
+      background: var(--green)
+    }
+
+    .composite-fill.yellow {
+      background: var(--orange)
+    }
+
+    .composite-fill.red {
+      background: var(--red)
+    }
+
+    .composite-marker {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      margin-left: -1px;
+      background: var(--orange);
+      box-shadow: 0 0 6px rgba(244, 185, 66, .7);
+      transition: left .15s ease
+    }
+
+    .composite-tune {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-top: 12px
+    }
+
+    .composite-tune label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--color-text-ter);
+      white-space: nowrap
+    }
+
+    .composite-tune .nudge-val {
+      font-size: 12px;
+      font-family: var(--font-mono);
+      color: var(--orange);
+      white-space: nowrap;
+      min-width: 44px;
+      text-align: right
+    }
+
+    .nudge-range {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 3px;
+      background: var(--color-border);
+      cursor: pointer
+    }
+
+    .nudge-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      background: var(--orange);
+      box-shadow: 0 0 0 4px rgba(244, 185, 66, .15);
+      transition: box-shadow .15s ease
+    }
+
+    .nudge-range::-webkit-slider-thumb:hover {
+      box-shadow: 0 0 0 6px rgba(244, 185, 66, .22)
+    }
+
+    .nudge-range::-moz-range-thumb {
+      width: 15px;
+      height: 15px;
+      border: none;
+      border-radius: 50%;
+      background: var(--orange);
+      box-shadow: 0 0 0 4px rgba(244, 185, 66, .15)
+    }
+
+    .grid-label {
+      align-self: flex-start;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: var(--color-text-ter);
+      margin-bottom: 8px
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 9px;
+      width: 100%;
+      margin-bottom: 16px
+    }
+
+    .card {
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 9px 11px
+    }
+
+    .card .c-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .7px;
+      color: var(--color-text-ter);
+      margin-bottom: 5px
+    }
+
+    .card .c-label svg {
+      width: 13px;
+      height: 13px;
+      flex: none;
+      color: var(--color-text-sec)
+    }
+
+    .c-bar {
+      height: 5px;
+      border-radius: 3px;
+      background: #0a0a0d;
+      overflow: hidden;
+      margin-bottom: 4px
+    }
+
+    .c-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--color-text-ter);
+      transition: width .4s, background .4s
+    }
+
+    .c-fill.green {
+      background: var(--green)
+    }
+
+    .c-fill.yellow {
+      background: var(--orange)
+    }
+
+    .c-fill.red {
+      background: var(--red)
+    }
+
+    .card .c-val {
+      font-size: 14px;
+      font-weight: 700;
+      font-family: var(--font-mono)
+    }
+
+    .spark-wrap {
+      position: relative;
+      margin-top: 6px;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #0a0a0d;
+      border: 1px solid rgba(255, 255, 255, .05)
+    }
+
+    .spark-wrap::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(to top, rgba(0, 191, 166, .10) 0 30%, rgba(244, 185, 66, .10) 30% 60%, rgba(226, 140, 124, .10) 60% 100%);
+      pointer-events: none
+    }
+
+    .spark {
+      display: block;
+      width: 100%;
+      height: 42px;
+      position: relative;
+      z-index: 1
+    }
+
+    .card .c-desc {
+      font-size: 10px;
+      line-height: 1.4;
+      color: var(--color-text-ter);
+      margin-top: 4px
+    }
+
+    .panels {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      width: 100%;
+      margin-bottom: 14px
+    }
+
+    .panel {
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      padding: 11px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px
+    }
+
+    .panel-title {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .9px;
+      color: var(--color-text-ter)
+    }
+
+    .tx {
+      height: 130px;
+      overflow-y: auto;
+      font-size: 13px;
+      line-height: 1.5;
+      background: #0a0a0d;
+      border-radius: 6px;
+      padding: 9px 11px;
+      color: var(--color-text-sec)
+    }
+
+    .tx:empty::before {
+      content: "–";
+      color: var(--color-text-ter)
+    }
+
+    .tx .interim {
+      color: var(--color-text-ter);
+      font-style: italic
+    }
+
+    .tx .line {
+      margin-bottom: 5px;
+      white-space: pre-wrap;
+      word-break: break-word
+    }
+
+    .log {
+      width: 100%;
+      height: 170px;
+      background: var(--color-panel);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.5
+    }
+
+    .log:empty::before {
+      content: "Event log. Click the mic to begin.";
+      color: var(--color-text-ter);
+      font-style: italic
+    }
+
+    .log .entry {
+      display: flex;
+      gap: 10px;
+      padding: 3px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, .04)
+    }
+
+    .log .ts {
+      color: var(--color-text-ter)
+    }
+
+    .log .type {
+      font-weight: 600
+    }
+
+    .log .preview {
+      color: var(--color-text-sec);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      opacity: .75;
+      flex: 1
+    }
+
+    .t-green {
+      color: var(--green)
+    }
+
+    .t-blue {
+      color: var(--color-accent)
+    }
+
+    .t-orange {
+      color: var(--orange)
+    }
+
+    .t-gray {
+      color: var(--color-text-ter)
+    }
+
+    .t-red {
+      color: var(--red)
+    }
+
+    .t-purple {
+      color: #b77db8
+    }
+
+    @media (max-width:899px) {
+      .container {
+        padding: 24px 14px
+      }
+
+      .grid,
+      .layers {
+        grid-template-columns: repeat(2, 1fr)
+      }
+
+      .panels {
+        grid-template-columns: 1fr
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="glow"></div>
+  <header class="topbar">
+    <a class="brand" href="https://ai-coustics.com" target="_blank" rel="noopener">
+      <span class="mark"></span>Tyto<span class="sub">— Audio Insights</span>
+    </a>
+    <nav>
+      <button type="button" id="keys-btn" class="nav-btn">Enter keys</button>
+      <a href="https://docs.ai-coustics.com" target="_blank" rel="noopener">Docs</a>
+      <a href="https://ai-coustics.com" target="_blank" rel="noopener">ai-coustics &rarr;</a>
+    </nav>
+  </header>
+  <div class="container">
+    <div class="controls">
+      <span id="status" class="badge"><span class="dot"></span>Disconnected</span>
+    </div>
+    <div class="mic-wrap">
+      <button id="mic" class="mic" aria-label="Toggle mic">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round">
+          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+          <line x1="12" y1="19" x2="12" y2="23"></line>
+          <line x1="8" y1="23" x2="16" y2="23"></line>
+        </svg>
+      </button>
+    </div>
+
+    <div id="banner" class="banner"></div>
+
+    <div class="layers">
+      <div id="layer-aware" class="layer">
+        <div class="l-head"><span class="l-name">1 · Aware</span><span class="l-pill" id="aware-pill">idle</span></div>
+        <div class="l-val" id="aware-val">Agent instructions are refreshed with a live room note.</div>
+      </div>
+      <div id="layer-tuned" class="layer eager">
+        <div class="l-head"><span class="l-name">2 · Tuned</span><span class="l-pill" id="tuned-pill">eager</span></div>
+        <div class="l-val" id="tuned-val">Turn-detection profile based on background activity.</div>
+      </div>
+      <div id="layer-react" class="layer">
+        <div class="l-head"><span class="l-name">3 · Reactive</span><span class="l-pill" id="react-pill">–</span></div>
+        <div class="l-val" id="react-val">Interrupts the agent when one issue dominates.</div>
+      </div>
+    </div>
+
+    <div class="composite">
+      <div class="composite-head">
+        <span class="composite-label"><span class="composite-formula" id="tyto-state">higher = worse</span></span>
+        <span class="composite-val" id="composite-val">–</span>
+      </div>
+      <div class="composite-bar">
+        <div class="composite-fill" id="composite-fill"></div>
+        <div class="composite-marker" id="composite-marker" title="Nudge fires when the risk crosses this line"></div>
+      </div>
+      <div class="composite-tune">
+        <label for="nudge-th">Nudge sensitivity</label>
+        <input type="range" class="nudge-range" id="nudge-th" min="0.35" max="0.60" step="0.01" value="0.50" aria-label="Nudge sensitivity">
+        <span class="nudge-val" id="nudge-th-val">≥ 0.50</span>
+      </div>
+    </div>
+
+    <div class="grid-label">Why · environment metrics</div>
+    <div class="grid" id="env-grid"></div>
+
+    <div class="panels">
+      <div class="panel">
+        <div class="panel-title">You</div>
+        <div id="user-tx" class="tx"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">Agent</div>
+        <div id="agent-tx" class="tx"></div>
+      </div>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <div class="gate" id="key-gate">
+    <div class="gate-card">
+      <h2>Run the demo with your own keys</h2>
+      <p class="gate-sub">This demo runs entirely in your browser. It connects to your own public
+        ElevenLabs agent by id (no ElevenLabs API key needed) and runs Tyto locally with your
+        ai-coustics license. Both values are stored only on this device — they never reach any server of ours.</p>
+      <label class="gate-field">
+        <span>ElevenLabs agent ID (public agent)</span>
+        <input type="text" id="k-agent" placeholder="agent_…" autocomplete="off" spellcheck="false">
+        <a href="https://elevenlabs.io/app/agents" target="_blank" rel="noopener">Create an agent →</a>
+      </label>
+      <label class="gate-field">
+        <span>ai-coustics SDK license key</span>
+        <input type="password" id="k-license" placeholder="your license key" autocomplete="off" spellcheck="false">
+        <a href="https://developers.ai-coustics.com" target="_blank" rel="noopener">Get an ai-coustics key →</a>
+      </label>
+      <div class="gate-err" id="k-err"></div>
+      <div class="gate-actions">
+        <button type="button" class="gate-btn ghost" id="k-clear">Clear keys</button>
+        <button type="button" class="gate-btn primary" id="k-save">Save &amp; close</button>
+      </div>
+    </div>
+  </div>
+
+  <audio id="remote" autoplay></audio>
+
+  <script type="module">
+    // ElevenLabs Conversational AI browser SDK. Loaded from a CDN (unpinned);
+    // pin a version for production. This one line brings in the voice backend;
+    // everything else is the shared Tyto demo.
+    import { Conversation } from "https://esm.sh/@elevenlabs/client";
+
+    const __WORKER_SRC__ = "// Tyto scoring worker \u00b7 runs the ai-coustics WASM SDK Analyzer off the UI thread.\n//\n// The page taps the mic at 16 kHz mono and streams Float32Array chunks here.\n// We feed them into the SDK Analyzer (which keeps its own rolling window) and\n// run analyze() every `hopMs`. Results go back as a flat snake_case metric\n// dict, mirroring what the old Python /tyto/score endpoint returned.\n//\n// Messages in:\n//   {type:\"init\", licenseKey, modelUrl, sampleRate, hopMs, windowSeconds}\n//   {type:\"audio\", chunk: Float32Array}    \u00b7 mic samples (transferred)\n//   {type:\"pause\"}                          \u00b7 agent speaking \u2192 drop audio, stop scoring\n//   {type:\"resume\"}                         \u00b7 user audio flowing again \u2192 reset + rewarm\n//   {type:\"stop\"}\n//\n// Messages out:\n//   {type:\"ready\", modelId, sdkVersion, numFrames}\n//   {type:\"scores\", scores: {risk_score, noise, \u2026}, analyzeMs}\n//   {type:\"error\", message}\n\n// SDK loaded straight from the public npm package via jsDelivr (pinned). The\n// glue resolves its companion .wasm relative to this URL, so there is nothing\n// to vendor \u2014 the wasm is fetched and CDN-cached on first load.\nimport init, { Model, Analyzer, getVersion } from \"https://cdn.jsdelivr.net/npm/@ai-coustics/aic-sdk-wasm@0.20.0/aic_sdk_wasm.js\";\n\nlet analyzer = null;\nlet numFrames = 0;\nlet sampleRate = 16000;\nlet windowSamples = 0;\nlet buffered = 0;          // samples fed since the last reset (warm-up gate)\nlet paused = false;\nlet timer = null;\n\n// Sample queue: chunks arrive as 128-frame worklet quanta, the analyzer wants\n// fixed `numFrames` blocks. Leftovers wait for the next chunk.\nlet queue = new Float32Array(0);\n\nfunction enqueue(chunk) {\n  const merged = new Float32Array(queue.length + chunk.length);\n  merged.set(queue, 0);\n  merged.set(chunk, queue.length);\n  let offset = 0;\n  while (merged.length - offset >= numFrames) {\n    analyzer.bufferInterleaved(merged.subarray(offset, offset + numFrames), 1, numFrames);\n    offset += numFrames;\n    buffered += numFrames;\n  }\n  queue = merged.slice(offset);\n}\n\nfunction tick() {\n  if (paused || !analyzer) return;\n  if (buffered < windowSamples) return;   // not enough real audio yet \u2192 don't score padded silence\n  const t0 = performance.now();\n  let result;\n  try {\n    result = analyzer.analyze();\n  } catch (err) {\n    postMessage({ type: \"error\", message: String(err) });\n    return;\n  }\n  const scores = {\n    risk_score: result.riskScore,\n    noise: result.noise,\n    speaker_reverb: result.speakerReverb,\n    speaker_loudness: result.speakerLoudness,\n    interfering_speech: result.interferingSpeech,\n    media_speech: result.mediaSpeech,\n    packet_loss: result.packetLoss,\n  };\n  result.free();\n  postMessage({ type: \"scores\", scores, analyzeMs: Math.round(performance.now() - t0) });\n}\n\nself.onmessage = async (e) => {\n  const msg = e.data;\n  if (msg.type === \"init\") {\n    try {\n      await init();\n      const bytes = new Uint8Array(await (await fetch(msg.modelUrl)).arrayBuffer());\n      const model = Model.fromBytes(bytes);\n      sampleRate = msg.sampleRate;\n      numFrames = model.getOptimalNumFrames(sampleRate);\n      windowSamples = Math.round(msg.windowSeconds * sampleRate);\n      analyzer = new Analyzer(model, msg.licenseKey);\n      analyzer.initialize(sampleRate, 1, numFrames, false);\n      postMessage({ type: \"ready\", modelId: model.getId(), sdkVersion: getVersion(), numFrames });\n      timer = setInterval(tick, msg.hopMs);\n    } catch (err) {\n      postMessage({ type: \"error\", message: String(err) });\n    }\n  } else if (msg.type === \"audio\") {\n    if (analyzer && !paused) enqueue(msg.chunk);\n  } else if (msg.type === \"pause\") {\n    paused = true;\n    queue = new Float32Array(0);\n  } else if (msg.type === \"resume\") {\n    // Stream discontinuity (mic was muted during agent speech): clear the\n    // analyzer's window so stale audio can't skew the next scores, then\n    // require a full window of fresh audio before scoring again.\n    if (analyzer) analyzer.reset();\n    queue = new Float32Array(0);\n    buffered = 0;\n    paused = false;\n  } else if (msg.type === \"stop\") {\n    if (timer) clearInterval(timer);\n    timer = null;\n    if (analyzer) { analyzer.free(); analyzer = null; }\n    close();\n  }\n};\n";
+    const __WORKER_URL__ = URL.createObjectURL(new Blob([__WORKER_SRC__], { type: "text/javascript" }));
+    const $ = (id) => document.getElementById(id);
+    const $status = $("status"), $mic = $("mic"), $log = $("log"), $audio = $("remote");
+    const $userTx = $("user-tx"), $agentTx = $("agent-tx"), $banner = $("banner");
+
+    // Scoring runs in the browser since SDK 0.20: static/tyto-worker.js hosts the
+    // WASM Analyzer (tyto-l-16khz) and posts a score dict every hop. Tyto's
+    // analysis window is fixed at 5 s; the hop just sets the UI cadence.
+    let TYTO_WINDOW_S = 5;
+    let TYTO_HOP_MS = 2000;
+    const TAP_RATE = 16000;              // mic tap → mono float32 chunks to the worker
+    const SERIES_HISTORY_MS = 30000;
+
+    // ── Serverless config (bring-your-own-keys) ───────────────────────────────────
+    // No backend: the visitor's agent id + license live only in this browser
+    // (localStorage). The browser connects to a PUBLIC ElevenLabs agent by id
+    // (no ElevenLabs API key needed) and runs Tyto locally over HTTPS.
+    const EL_CONNECTION_TYPE = "websocket"; // public agents connect by id, no key
+    const EL_VOICE_ID = "";                 // "" = use the agent's configured voice
+    const TYTO_MODEL_URL =
+      "https://artifacts.ai-coustics.io/models/tyto-l-16khz/v5/tyto_l_16khz_yhlek4hc_v43.aicmodel";
+    const KEYS = {
+      get agentId() { return localStorage.getItem("aic_demo_el_agent_id") || ""; },
+      get license() { return localStorage.getItem("aic_demo_license_key") || ""; },
+      set(agentId, license) {
+        localStorage.setItem("aic_demo_el_agent_id", agentId.trim());
+        localStorage.setItem("aic_demo_license_key", license.trim());
+      },
+      clear() {
+        localStorage.removeItem("aic_demo_el_agent_id");
+        localStorage.removeItem("aic_demo_license_key");
+      },
+      get present() { return !!(this.agentId && this.license); },
+    };
+
+    const ENV_KEYS = ["noise", "speaker_reverb", "speaker_loudness",
+      "interfering_speech", "media_speech", "packet_loss"];
+    const ALL_KEYS = ENV_KEYS;
+    const LABELS = {
+      noise: "Noise",
+      speaker_reverb: "Speaker Reverb",
+      speaker_loudness: "Speaker Loudness",
+      interfering_speech: "Interfering Speech",
+      media_speech: "Background Media",
+      packet_loss: "Packet Loss",
+    };
+    const ICONS = {
+      noise: '<path d="M2 6c.6.5 1.2 1 2.5 1C7 7 7 5 9.5 5c2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/><path d="M2 12c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/><path d="M2 18c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 2.6 0 2.4 2 5 2 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/>',
+      speaker_reverb: '<circle cx="12" cy="12" r="2"/><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9"/><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5"/><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5"/><path d="M19.1 4.9C23 8.8 23 15.2 19.1 19.1"/>',
+      speaker_loudness: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+      interfering_speech: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+      media_speech: '<rect x="2" y="7" width="20" height="15" rx="2" ry="2"/><polyline points="17 2 12 7 7 2"/>',
+      packet_loss: '<line x1="2" y1="2" x2="22" y2="22"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M2 8.82a15 15 0 0 1 4.17-2.65"/><path d="M10.66 5c4.01-.36 8.14.9 11.34 3.76"/><path d="M16.85 11.25a10 10 0 0 1 2.22 1.68"/><path d="M5 13a10 10 0 0 1 5.24-2.76"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
+    };
+    const icon = (k) => ICONS[k] ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>` : "";
+    // Polarity "None": informational only, never colored as a problem or flagged as an issue.
+    const NO_POLARITY = new Set(["speaker_loudness", "speaker_reverb"]);
+    // A metric is only named as the top issue when it is also clearly elevated.
+    const MIN_EXPLANATION_VALUE = 0.30;
+    // Per-dimension green/yellow cutoffs for UI coloring (lower is better).
+    const THRESHOLDS = {
+      noise: [0.20, 0.45],
+      interfering_speech: [0.15, 0.35],
+      media_speech: [0.20, 0.45],
+      packet_loss: [0.05, 0.15],
+      speaker_reverb: [0.25, 0.55],
+      speaker_loudness: [0.12, 0.25],
+    };
+    // Tyto Risk Score bands from the SDK docs: <0.35 good, 0.35–0.60 warn, >0.60 bad.
+    const COMPOSITE_TH = [0.35, 0.60];
+    const COMPOSITE_NUDGE = 0.60;   // boundary of the "bad" band, used for labelling
+    const COMPOSITE_CLEAR = 0.35;   // <  → episode considered over (hysteresis)
+    const SCORE_EMA_ALPHA = 0.5;    // smoothing of successive analyze() reads
+    // Risk Score at/above which a nudge may fire (when a cause also dominates).
+    // Decoupled from COMPOSITE_NUDGE so it can be tuned without shifting the bands.
+    // Live-adjustable via the slider under the score bar.
+    const NUDGE_THRESHOLD_DEFAULT = 0.50, NUDGE_THRESHOLD_MIN = COMPOSITE_CLEAR, NUDGE_THRESHOLD_MAX = COMPOSITE_NUDGE;
+    let nudgeThreshold = NUDGE_THRESHOLD_DEFAULT;
+    const VAD_PROFILES = {
+      eager: { type: "semantic_vad", eagerness: "auto", create_response: true, interrupt_response: true },
+      patient: {
+        type: "server_vad", threshold: 0.55, prefix_padding_ms: 400, silence_duration_ms: 900,
+        create_response: true, interrupt_response: true
+      },
+    };
+    const DESCRIPTIONS = {
+      noise: "Ambient noise behind the speaker, relative to the speaker's level. High = the noise is loud compared to the speaker.",
+      packet_loss: "Audio dropouts or discontinuities: packet loss, jitter, frame erasure, or CPU overload.",
+      interfering_speech: "Other live speakers audible in the audio: office, cafe, public place.",
+      media_speech: "TV, YouTube, radio, or a podcast playing in the background.",
+      speaker_loudness: "Loudness level of the main speaker. Informational only.",
+      speaker_reverb: "Low = dry, near-field audio; high = reverberant, far-field audio. Informational only.",
+    };
+
+    // ── Decision layer (ported from the old Python tyto_monitor.py) ────────────────
+    // `thr` is each dimension's red cutoff: the metric must be past it AND over
+    // MIN_EXPLANATION_VALUE to be named as the dominant cause.
+    const EXPLANATIONS = [
+      {
+        key: "noise", thr: THRESHOLDS.noise[1],
+        text: "Sorry, there is a lot of background noise. Could you move somewhere quieter?",
+        room: "loud background noise",
+      },
+      {
+        key: "packet_loss", thr: THRESHOLDS.packet_loss[1],
+        text: "Sorry, your connection seems unstable. Could you check it and try again?",
+        room: "an unstable connection with audio dropouts",
+      },
+      {
+        key: "interfering_speech", thr: THRESHOLDS.interfering_speech[1],
+        text: "Sorry, I may be picking up other voices. Could you make sure it is just you speaking?",
+        room: "other people speaking nearby",
+      },
+      {
+        key: "media_speech", thr: THRESHOLDS.media_speech[1],
+        text: "Sorry, there seems to be a TV or music playing. Could you turn it down?",
+        room: "a TV or radio playing nearby",
+      },
+    ];
+    const NOISY_KEYS = ["noise", "media_speech", "interfering_speech"];
+    const NOISY_TRIP = 0.45;  // any of those over this → patient VAD
+
+    function strongestCause(m) {
+      let best = null, bestSev = 0;
+      for (const rule of EXPLANATIONS) {
+        const v = m[rule.key];
+        if (typeof v !== "number" || v <= rule.thr || v < MIN_EXPLANATION_VALUE) continue;
+        const sev = (v - rule.thr) / Math.max(1e-6, 1 - rule.thr);
+        if (sev > bestSev) { best = { ...rule, value: v, severity: sev }; bestSev = sev; }
+      }
+      return best;
+    }
+    function roomStateSummary(m, risk) {
+      if (!m || risk == null) return "";
+      const cause = strongestCause(m);
+      if (!cause) return "";  // no dominant cause: say nothing at all
+      const severity = risk >= COMPOSITE_NUDGE ? "degraded" : risk >= COMPOSITE_TH[0] ? "marginal" : "borderline";
+      return `Audio note: ${severity} input, ${cause.room}. ` +
+        "Be patient with possible misunderstandings and confirm any critical " +
+        "details by repeating them back to the user.";
+    }
+    function pickVadProfile(m) {
+      if (!m) return "eager";
+      return NOISY_KEYS.some(k => (m[k] || 0) >= NOISY_TRIP) ? "patient" : "eager";
+    }
+    // Trips a nudge when the smoothed risk score is high AND a dominant cause has
+    // persisted `minPersist` consecutive scored chunks. No timers: after firing,
+    // the streak resets, so it takes another full run of bad chunks to re-fire.
+    class EnvMonitor {
+      constructor(minPersist = 1, threshold = nudgeThreshold) {
+        this.minPersist = minPersist;
+        this.threshold = threshold;   // Risk Score gate; live-adjustable
+        this.streak = {};
+      }
+      evaluate(m) {
+        const risk = m.risk_score ?? 0;
+        if (risk < COMPOSITE_CLEAR) { this.streak = {}; return null; }
+        // Nudge only with a certain reason: a red Risk Score alone never fires.
+        const cause = strongestCause(m);
+        if (!cause) { this.streak = {}; return null; }
+        const k = cause.key;
+        this.streak[k] = (this.streak[k] || 0) + 1;
+        for (const other of Object.keys(this.streak)) if (other !== k) this.streak[other] = 0;
+        if (this.streak[k] < this.minPersist) return null;
+        if (risk < this.threshold) return null;
+        this.streak[k] = 0;  // re-arm: needs another full streak to fire again
+        return { key: k, label: LABELS[k], value: cause.value, text: cause.text };
+      }
+    }
+    // Factual background on Tyto (grounded in the ai-coustics docs) so the agent
+    // can act as an accurate Tyto guide, not just a generic assistant.
+    const TYTO_BACKGROUND =
+      "Background on Tyto — the model powering this demo — so you can be an accurate guide to it:\n" +
+      "• What it is: Tyto is a lightweight audio-insight model from ai-coustics, built for voice AI. " +
+      "It listens to the audio flowing from a human into a voice AI stack and predicts whether that " +
+      "audio will cause failures in downstream models (voice activity detection, turn-taking, " +
+      "speech-to-text, speech-to-speech) — and why. It runs on CPU, on-premise, with no audio leaving " +
+      "your infrastructure; in this demo it runs entirely in your browser via the ai-coustics WASM SDK, " +
+      "scoring your microphone live.\n" +
+      "• What it outputs: one Tyto Risk Score from 0 to 1 (higher means more likely to break downstream " +
+      "models; rough bands: under 0.35 is good, 0.35 to 0.60 is noticeable degradation, above 0.60 is " +
+      "severe), plus six dimensions that explain why: noise, speaker reverb, speaker loudness (a neutral " +
+      "level meter, not a problem), interfering speech, background media speech (a TV or radio), and packet loss.\n" +
+      "• Where you'd use it: any voice AI product where bad input audio breaks things — voice agents, " +
+      "call centers, drive-throughs, IVR, consumer assistants. In real time the agent can adapt mid-call " +
+      "(warn the user, switch to manual turn-taking, disable barge-in, ask them to turn the TV down, or " +
+      "relax end-of-speech timeouts on packet loss). Offline you can score 100% of calls cheaply, triage " +
+      "the worst, attribute failures to audio versus agent logic, and track quality by device, carrier or campaign.\n" +
+      "• This demo: real-time use — Tyto scores your mic and the agent adapts on three layers. Aware: it " +
+      "factors your room into every reply. Tuned: it retunes turn-taking in noise. Reactive: it nudges you " +
+      "when one issue dominates.\n" +
+      "• Getting started: docs are at docs.ai-coustics.com, and SDK license keys come from the developer " +
+      "platform at developers.ai-coustics.com.";
+
+    const BASE_INSTRUCTIONS =
+      "You are the witty, upbeat host of the Tyto demo, and a knowledgeable guide to Tyto. " +
+      "This is a voice conversation, so keep every reply short and natural — a sentence or two, never a monologue. " +
+      "OPEN THE CONVERSATION YOURSELF: greet the user warmly in one breath, tell them in a half-sentence that " +
+      "Tyto is listening to their mic to judge how well a voice AI would hear them, and then give them ONE fun, " +
+      "neutral prompt that gets them talking out loud for a minute or two (Tyto needs a steady stream of speech " +
+      "to score). Pick a different opener each time from ideas like: describe your perfect day from morning to " +
+      "night; pitch the most ridiculous startup you can imagine; give me a passionate review of a snack you love; " +
+      "narrate how to make your favourite meal step by step; plan a dream trip out loud; or explain a hobby to me " +
+      "like I have never heard of it. Keep it light and a little funny, never personal or sensitive. After they " +
+      "start, react briefly and warmly and nudge them to keep going ('love it, and then what?') so the speech " +
+      "keeps flowing. " +
+      "You can also explain what Tyto is, what its score and dimensions mean, where someone would use it, and how " +
+      "this demo works, using the background below as ground truth. If you are unsure of a specific integration " +
+      "detail or exact number, say so briefly and point them to docs.ai-coustics.com or the developer platform " +
+      "rather than guessing. " +
+      "Do not speculate about audio quality from context alone. " +
+      "When the user asks how their audio sounds, call check_audio_quality and answer from its result. " +
+      "If the system message contains an 'Audio note:' line, treat it as ground truth about the " +
+      "room and let it inform your answers: play along with good humour, be patient with possible " +
+      "misunderstandings, slow down slightly, and confirm critical details by repeating them back when audio is degraded. " +
+      "\n\n" + TYTO_BACKGROUND;
+
+    // ElevenLabs speaks a fixed opening line (the prompt's "open yourself"
+    // instruction can't drive the very first turn the way OpenAI Realtime's
+    // response.create does), so we give it one that gets the user talking.
+    const FIRST_MESSAGE =
+      "Hey, welcome! I'm your Tyto demo host. Tyto's listening to your mic right now to gauge " +
+      "how well a voice AI would hear you, so I need you talking for a minute or two. To kick us off: " +
+      "pitch me the most ridiculous startup idea you can dream up.";
+
+    let provider = null, micStream = null, connected = false;
+    let tapCtx = null, tapNode = null, tytoWorker = null, workerScoring = true;
+    let emaMetrics = null, envMonitor = null;
+    let agentSpeaking = false, agentAudioPlaying = false, listening = true;
+    let userFinals = [], userInterim = "", agentFinals = [], agentInterim = "";
+    let lastMetrics = null, lastComposite = null, lastRoomState = "", lastVadProfile = "eager";
+    let awaitingNudge = false, nudgeActive = false, nudgePlaybackPending = false;
+    const emaAlpha = 0.3;
+    let rafId = null;
+
+    class MetricSeries {
+      constructor(keys) {
+        this.keys = keys;
+        this.points = new Map();
+        this.emaPrev = new Map();
+        for (const key of keys) this.points.set(key, []);
+      }
+      push(t, values, alpha) {
+        const a = Math.min(1, Math.max(0, alpha));
+        for (const key of this.keys) {
+          const value = values[key];
+          if (typeof value !== "number" || !Number.isFinite(value)) continue;
+          const prev = this.emaPrev.get(key);
+          const ema = prev === undefined ? value : a * value + (1 - a) * prev;
+          this.emaPrev.set(key, ema);
+          this.points.get(key).push({ t, raw: value, ema });
+        }
+      }
+      prune(now, historyMs) {
+        const cutoff = now - historyMs - 2000;
+        for (const arr of this.points.values()) {
+          let idx = 0;
+          while (idx < arr.length && arr[idx].t < cutoff) idx++;
+          if (idx > 0) arr.splice(0, idx);
+        }
+      }
+      get(key) { return this.points.get(key) || []; }
+      clear() {
+        for (const key of this.keys) this.points.set(key, []);
+        this.emaPrev.clear();
+      }
+    }
+
+    const metricSeries = new MetricSeries(ALL_KEYS);
+    const sparkCanvases = new Map();
+
+    // ── Voice provider adapter ─────────────────────────────────────────────────────
+    // The Tyto control layers (Aware / Tuned / Reactive) talk to the voice agent
+    // only through this interface, so supporting another backend (ElevenLabs, a
+    // cascaded STT→LLM→TTS stack, …) means writing one more class with the same
+    // shape. Everything ElevenLabs-specific — the Conversation SDK, contextual
+    // updates, client tools — lives here and nowhere else.
+    //
+    // Commands (app → provider):
+    //   connect({ agentId, instructions, firstMessage, clientTools }) → Promise
+    //   disconnect()
+    //   setInstructions(full, roomNote)  Layer 1 · Aware (contextual update)
+    //   setTurnDetection(td|null)        Layer 2 · Tuned (no-op: EL manages turns)
+    //   interrupt()                      no-op: EL handles barge-in
+    //   nudge(text)                      Layer 3 · contextual hint
+    //   sendToolResult(callId, output)   unused: tools answered by clientTools
+    //
+    // Events (provider → app), supplied as handlers, all optional:
+    //   onAgentSpeaking(active, { nudge, cancelled })
+    //   onAgentAudio(playing)
+    //   onUserTranscript(text, final)
+    //   onAgentTranscript(text, final)
+    //   onToolCall(name, callId)
+    class ElevenLabsProvider {
+      constructor(handlers, { log } = {}) {
+        this.h = handlers;
+        this.log = log;
+        this.conversation = null;
+        // Capabilities the shared layer code checks below. ElevenLabs runs
+        // turn-taking server-side and exposes no client-side response.cancel, so
+        // it can't retune VAD at runtime or force a verbatim interrupt; those two
+        // layers degrade gracefully (see setTurnDetection / fireNudge) rather
+        // than being faked.
+        this.managesTurnTaking = true;
+        this.canInterrupt = false;
+        this._warnedTd = false;
+      }
+
+      get ready() { return !!this.conversation; }
+
+      async connect({ agentId, instructions, firstMessage, voiceId, clientTools }) {
+        // Push the Tyto prompt + greeting as session overrides (the agent must
+        // have prompt/first-message overrides enabled in its security settings).
+        const overrides = { agent: { prompt: { prompt: instructions } } };
+        if (firstMessage) overrides.agent.firstMessage = firstMessage;
+        if (voiceId) overrides.tts = { voiceId };
+        this.conversation = await Conversation.startSession({
+          agentId,
+          connectionType: EL_CONNECTION_TYPE,
+          overrides,
+          clientTools,
+          onConnect: () => { this.log?.("el.connected", {}); this.h.onReady?.(); },
+          onDisconnect: (d) => this.log?.("el.disconnected", d || {}),
+          onError: (message) => this.log?.("error", { message: String(message) }),
+          onModeChange: ({ mode }) => {
+            // ElevenLabs gives one speaking/listening signal; drive both the
+            // generation and audio gates from it so Tyto pauses while the agent
+            // talks (same mute/pause behavior as the OpenAI version).
+            const speaking = mode === "speaking";
+            this.h.onAgentSpeaking?.(speaking, {});
+            this.h.onAgentAudio?.(speaking);
+          },
+          onMessage: ({ message, source }) => {
+            if (source === "user") this.h.onUserTranscript?.(message || "", true);
+            else this.h.onAgentTranscript?.(message || "", true);
+          },
+        });
+      }
+
+      disconnect() {
+        if (this.conversation) { try { this.conversation.endSession(); } catch { } this.conversation = null; }
+      }
+
+      // Layer 1 · Aware: inject the live room note as a non-interrupting context
+      // update (the base prompt is already set via the startSession override).
+      setInstructions(_full, roomNote) {
+        if (roomNote) this.conversation?.sendContextualUpdate?.(roomNote);
+      }
+      // Layer 2 · Tuned: ElevenLabs manages turn-taking server-side; there is no
+      // client API to switch eager/patient at runtime. Documented gap, not faked.
+      setTurnDetection(_td) {
+        if (!this._warnedTd) {
+          this.log?.("tyto.vad.note", { message: "ElevenLabs manages turn-taking server-side; not switched at runtime" });
+          this._warnedTd = true;
+        }
+      }
+      // Layer 3 · Reactive: no client-side interrupt (EL handles barge-in).
+      interrupt() { }
+      // Delivered as a contextual hint rather than a forced verbatim line, since
+      // ElevenLabs decides phrasing and timing itself.
+      nudge(text) {
+        this.conversation?.sendContextualUpdate?.(
+          `The user's audio quality just dropped. Briefly tell them, in your own warm voice: ${JSON.stringify(text)}`
+        );
+      }
+      // The agent opens with its firstMessage, so nothing to request.
+      requestResponse() { }
+      // check_audio_quality is answered by the clientTools handler in connect().
+      sendToolResult() { }
+    }
+
+    // ── UI helpers ─────────────────────────────────────────────────────────────────
+    function setStatus(state, label) { $status.className = "badge " + state; $status.innerHTML = `<span class="dot"></span>${label}`; }
+    // Tyto's own lifecycle, shown under the score (separate from the call status):
+    // loading the model → warming up on first speech → scoring (or error).
+    function setTytoState(state, text) {
+      const el = $("tyto-state"); if (!el) return;
+      el.className = "composite-formula" + (state ? " ts-" + state : "");
+      el.textContent = text || "higher = worse";
+    }
+    function colorFor(t) {
+      if (t.startsWith("tyto.nudge") || t.startsWith("tool.")) return "t-orange";
+      if (t.startsWith("tyto.aware")) return "t-purple";
+      if (t.startsWith("tyto.vad")) return "t-blue";
+      if (t.includes("transcript")) return "t-blue";
+      if (t === "response.create" || t === "session.update") return "t-orange";
+      if (t === "error" || t === "tyto.error") return "t-red";
+      if (t.startsWith("tyto.")) return "t-green";
+      return "t-gray";
+    }
+    function log(type, obj) {
+      const ts = new Date().toTimeString().slice(0, 8);
+      let preview = "";
+      if (obj) { if (obj.transcript) preview = `"${obj.transcript}"`; else if (obj.text) preview = obj.text; else if (obj.message) preview = obj.message; else preview = JSON.stringify(obj).slice(0, 140); }
+      const e = document.createElement("div"); e.className = "entry";
+      e.innerHTML = `<span class="ts">${ts}</span><span class="type ${colorFor(type)}">${type}</span><span class="preview"></span>`;
+      e.querySelector(".preview").textContent = preview;
+      $log.appendChild(e); $log.scrollTop = $log.scrollHeight;
+    }
+    function buildCards() {
+      sparkCanvases.clear();
+      const make = (grid, keys) => {
+        grid.innerHTML = "";
+        for (const k of keys) {
+          const c = document.createElement("div"); c.className = "card"; c.title = DESCRIPTIONS[k] || "";
+          c.innerHTML = `<div class="c-label">${icon(k)}<span>${LABELS[k]}</span></div>` +
+            `<div class="c-bar"><div class="c-fill" id="fill-${k}"></div></div>` +
+            `<div class="c-val" id="val-${k}">–</div>` +
+            `<div class="spark-wrap"><canvas class="spark" id="spark-${k}"></canvas></div>` +
+            `<div class="c-desc">${DESCRIPTIONS[k] || ""}</div>`;
+          grid.appendChild(c);
+          sparkCanvases.set(k, c.querySelector(`#spark-${k}`));
+        }
+      };
+      make($("env-grid"), ENV_KEYS);
+    }
+    function syncSparkCanvas(canvas) {
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(canvas.clientWidth * dpr));
+      const height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      return { width, height, dpr };
+    }
+    function strokeSeries(ctx, points, pickValue, width, height, now, color, alpha) {
+      const start = now - SERIES_HISTORY_MS;
+      let started = false;
+      ctx.beginPath();
+      for (const point of points) {
+        const x = ((point.t - start) / SERIES_HISTORY_MS) * width;
+        const y = height - (Math.max(0, Math.min(1, pickValue(point))) * height);
+        if (!started) { ctx.moveTo(x, y); started = true; }
+        else ctx.lineTo(x, y);
+      }
+      if (!started) return;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    function renderSeries() {
+      const now = Date.now();
+      metricSeries.prune(now, SERIES_HISTORY_MS);
+      for (const key of ALL_KEYS) {
+        const canvas = sparkCanvases.get(key);
+        if (!canvas) continue;
+        const { width, height } = syncSparkCanvas(canvas);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) continue;
+        ctx.clearRect(0, 0, width, height);
+        const points = metricSeries.get(key);
+        if (!points.length) continue;
+        strokeSeries(ctx, points, (point) => point.raw, width, height, now, "#6993FF", 0.95);
+        strokeSeries(ctx, points, (point) => point.ema, width, height, now, "#F9F9F9", 0.85);
+        const latest = points[points.length - 1];
+        const markerY = height - (Math.max(0, Math.min(1, latest.raw)) * height);
+        ctx.fillStyle = bucket(key, latest.raw) === "green" ? "#00BFA6" : bucket(key, latest.raw) === "yellow" ? "#F4B942" : "#E28C7C";
+        ctx.beginPath();
+        ctx.arc(width - 4, markerY, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      rafId = requestAnimationFrame(renderSeries);
+    }
+    function startSeriesLoop() {
+      if (rafId != null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(renderSeries);
+    }
+    function clearSeries() {
+      metricSeries.clear();
+      for (const canvas of sparkCanvases.values()) {
+        const ctx = canvas.getContext("2d");
+        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+    function bucket(key, v) {
+      if (NO_POLARITY.has(key)) return "green";
+      const th = THRESHOLDS[key] || [0.30, 0.60];
+      return v < th[0] ? "green" : v < th[1] ? "yellow" : "red";
+    }
+    function compositeBucket(v) { return v < COMPOSITE_TH[0] ? "green" : v < COMPOSITE_TH[1] ? "yellow" : "red"; }
+    function renderComposite(d) {
+      const c = d.composite; if (c == null) return;
+      const fill = $("composite-fill"), val = $("composite-val");
+      fill.style.width = Math.round(Math.min(1, c) * 100) + "%";
+      fill.className = "composite-fill " + compositeBucket(c);
+      val.textContent = c.toFixed(2);
+      // The marker (nudge line) is positioned by setNudgeThreshold, not here.
+    }
+    function renderMetrics(m) {
+      for (const k of ALL_KEYS) {
+        const v = m[k]; const fill = $(`fill-${k}`), val = $(`val-${k}`);
+        if (v == null || !fill) continue;
+        fill.style.width = Math.round(Math.min(1, v) * 100) + "%";
+        fill.className = "c-fill " + bucket(k, v);
+        val.textContent = v.toFixed(2);
+      }
+    }
+    function renderTx() {
+      const draw = (el, f, i) => { el.innerHTML = ""; for (const x of f) { const d = document.createElement("div"); d.className = "line"; d.textContent = x; el.appendChild(d) } if (i) { const d = document.createElement("div"); d.className = "line interim"; d.textContent = i; el.appendChild(d) } el.scrollTop = el.scrollHeight };
+      draw($userTx, userFinals, userInterim); draw($agentTx, agentFinals, agentInterim);
+    }
+    function updateLayerCards(d) {
+      const aware = $("aware-val"), awarePill = $("aware-pill");
+      if (d.room_state) { aware.textContent = d.room_state; awarePill.textContent = "injected"; }
+      else { aware.textContent = "Room sounds clean, agent has no extra context."; awarePill.textContent = "clean"; }
+      const tunedPill = $("tuned-pill"), tunedVal = $("tuned-val");
+      tunedPill.textContent = d.vad_profile || "eager";
+      $("layer-tuned").classList.toggle("patient", d.vad_profile === "patient");
+      $("layer-tuned").classList.toggle("eager", d.vad_profile !== "patient");
+      tunedVal.textContent = d.vad_profile === "patient"
+        ? "Background is noisy → longer pauses, higher VAD threshold."
+        : "Quiet room → eager semantic VAD for snappy turns.";
+    }
+
+    // ── Tool: agent asks "how do I sound?" ────────────────────────────────────────
+    function strongestEnv(m) {
+      if (!m) return null;
+      let best = null;
+      for (const k of ENV_KEYS) {
+        if (NO_POLARITY.has(k)) continue;
+        const v = m[k]; if (typeof v !== "number" || v < MIN_EXPLANATION_VALUE) continue;
+        const th = THRESHOLDS[k] || [0.30, 0.60];
+        const severity = Math.max(0, v - th[0]) / Math.max(1 - th[0], 1e-6);
+        if (!best || severity > best.severity) best = { key: k, value: v, severity };
+      }
+      return best;
+    }
+    function audioQualitySnapshot() {
+      if (!lastMetrics) return { status: "warming up, ask again in a few seconds" };
+      const verdict = lastComposite >= COMPOSITE_TH[1] ? "degraded" : lastComposite >= COMPOSITE_TH[0] ? "marginal" : "good";
+      const top = strongestEnv(lastMetrics);
+      const r = { tyto_score: +lastComposite.toFixed(2), verdict };
+      for (const k of ENV_KEYS) if (lastMetrics[k] != null) r[LABELS[k].toLowerCase().replace(/ /g, "_")] = +lastMetrics[k].toFixed(2);
+      if (top && top.severity > 0) {
+        r.top_issue = { key: top.key, label: LABELS[top.key], value: +top.value.toFixed(2), direction: "high" };
+        r.summary = `Audio is ${verdict}. Biggest issue: ${LABELS[top.key]} is high at ${top.value.toFixed(2)}.`;
+      } else { r.summary = `Audio is ${verdict}.`; }
+      return r;
+    }
+
+    // ── Provider event handlers (normalized, provider-agnostic) ───────────────────
+    // Only a Tyto nudge should hard-cut audio-in; normal agent replies must still
+    // let the user barge in.
+    function onAgentSpeaking(active, { nudge = false, cancelled = false } = {}) {
+      agentSpeaking = active;
+      if (active) {
+        if (nudge && awaitingNudge) { muteMicForAgent(); nudgeActive = true; awaitingNudge = false; }
+      } else if (nudge || nudgeActive) {
+        // Generation is done but the audio may still be playing: stay muted until
+        // playback stops (cancelled / no audio = nothing to play).
+        if (cancelled || !agentAudioPlaying) resumeAfterNudge();
+        else nudgePlaybackPending = true;
+      } else if (!agentAudioPlaying) { maybeUnmuteMic(); }
+      syncWorkerGate();
+    }
+    function onAgentAudio(playing) {
+      agentAudioPlaying = playing;
+      if (!playing) { if (nudgePlaybackPending) resumeAfterNudge(); else maybeUnmuteMic(); }
+      syncWorkerGate();
+    }
+    function onToolCall(name, callId) {
+      if (name !== "check_audio_quality") return;
+      const result = audioQualitySnapshot();
+      log("tool.check_audio_quality", result);
+      provider.sendToolResult(callId, result);
+    }
+    function onUserTranscript(text, final) {
+      if (final) { if (text) userFinals.push(text); userInterim = ""; } else userInterim += text;
+      renderTx();
+    }
+    function onAgentTranscript(text, final) {
+      if (final) { if (text) agentFinals.push(text); agentInterim = ""; } else agentInterim += text;
+      renderTx();
+    }
+    // Once the session is configured, have the agent speak first: its system
+    // prompt tells it to open with a short, funny prompt that gets the user
+    // talking for a minute or two so Tyto has real audio to score.
+    function onReady() { provider?.requestResponse(); }
+    const providerHandlers = { onReady, onAgentSpeaking, onAgentAudio, onToolCall, onUserTranscript, onAgentTranscript };
+
+    // ── Audio tap → Tyto worker (in-browser WASM Analyzer) ─────────────────────────
+    const WORKLET = `
+class Tap extends AudioWorkletProcessor{
+  process(inputs){ const ch=inputs[0][0]; if(ch) this.port.postMessage(new Float32Array(ch)); return true; }
+}
+registerProcessor("tap",Tap);`;
+    async function startTap(stream) {
+      tapCtx = new AudioContext({ sampleRate: TAP_RATE });
+      if (tapCtx.state === "suspended") await tapCtx.resume();
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+      await tapCtx.audioWorklet.addModule(url);
+      const src = tapCtx.createMediaStreamSource(stream);
+      tapNode = new AudioWorkletNode(tapCtx, "tap");
+      tapNode.port.onmessage = (e) => {
+        if (tytoWorker && workerScoring) tytoWorker.postMessage({ type: "audio", chunk: e.data }, [e.data.buffer]);
+      };
+      src.connect(tapNode);
+    }
+    async function startTytoWorker() {
+      emaMetrics = null;
+      envMonitor = new EnvMonitor(1, nudgeThreshold);
+      workerScoring = true;
+      tytoWorker = new Worker(__WORKER_URL__, { type: "module" });
+      setTytoState("loading", "loading Tyto model…");
+      tytoWorker.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === "ready") { log("tyto.ready", { model: m.modelId, sdk: m.sdkVersion, window_s: TYTO_WINDOW_S, hop_s: TYTO_HOP_MS / 1000 }); setTytoState("warming", "warming up — keep talking"); }
+        else if (m.type === "scores") onScores(m.scores, m.analyzeMs);
+        else if (m.type === "error") { log("tyto.error", { message: m.message }); setTytoState("error", "Tyto error — check your key"); }
+      };
+      tytoWorker.postMessage({
+        type: "init", licenseKey: KEYS.license, modelUrl: TYTO_MODEL_URL,
+        sampleRate: TAP_RATE, hopMs: TYTO_HOP_MS, windowSeconds: TYTO_WINDOW_S,
+      });
+    }
+    // Audio-in is off while the agent speaks (mic muted, tap dropped), so only
+    // score when the user's audio is actually flowing. Pausing the worker keeps
+    // cause streaks frozen during agent speech instead of clearing them; on
+    // resume the analyzer resets and rewarms with a full window of fresh audio.
+    function syncWorkerGate() {
+      const shouldScore = connected && listening && !agentSpeaking && !agentAudioPlaying;
+      if (!tytoWorker || shouldScore === workerScoring) return;
+      workerScoring = shouldScore;
+      tytoWorker.postMessage({ type: shouldScore ? "resume" : "pause" });
+    }
+    function onScores(raw, analyzeMs) {
+      if (!lastMetrics) setTytoState(null);   // first score in: Tyto is live
+      emaMetrics = emaMetrics
+        ? Object.fromEntries(Object.keys(raw).map(k => [k, SCORE_EMA_ALPHA * raw[k] + (1 - SCORE_EMA_ALPHA) * (emaMetrics[k] ?? raw[k])]))
+        : { ...raw };
+      const metrics = emaMetrics;
+      metricSeries.push(Date.now(), raw, emaAlpha);
+      renderMetrics(metrics); lastMetrics = metrics;
+      lastComposite = metrics.risk_score; renderComposite({ composite: lastComposite });
+      const room = roomStateSummary(metrics, lastComposite);
+      const vad = pickVadProfile(metrics);
+      updateLayerCards({ room_state: room, vad_profile: vad });
+      // Layer 1 · Aware
+      if (room !== lastRoomState) {
+        lastRoomState = room;
+        pushInstructions(lastRoomState);
+        log("tyto.aware.update", { room_state: lastRoomState || "(clean)" });
+      }
+      // Layer 2 · Tuned
+      if (vad !== lastVadProfile) {
+        lastVadProfile = vad;
+        pushVadProfile(lastVadProfile);
+        log("tyto.vad.swap", { profile: lastVadProfile });
+      }
+      // Layer 3 · Reactive
+      const directive = envMonitor ? envMonitor.evaluate(metrics) : null;
+      if (directive) fireNudge(directive);
+    }
+
+    // ── Layer 1 · Aware ───────────────────────────────────────────────────────────
+    function pushInstructions(roomState) {
+      // Pass the full string (OpenAI-shaped) and the room note separately, so a
+      // contextual-update backend (ElevenLabs) can send just the live note.
+      provider?.setInstructions(BASE_INSTRUCTIONS + (roomState ? `\n\n${roomState}` : ""), roomState);
+    }
+    // ── Layer 2 · Tuned ───────────────────────────────────────────────────────────
+    function pushVadProfile(profile) {
+      provider?.setTurnDetection(VAD_PROFILES[profile] || VAD_PROFILES.eager);
+    }
+    // ── Layer 3 · Reactive ────────────────────────────────────────────────────────
+    function setMicEnabled(on) { if (micStream) micStream.getAudioTracks().forEach(t => t.enabled = on); }
+    function muteMicForAgent() {
+      setMicEnabled(false);
+      syncWorkerGate();
+    }
+    function maybeUnmuteMic() {
+      if (agentSpeaking || agentAudioPlaying) return;
+      if (awaitingNudge || nudgeActive || nudgePlaybackPending || !listening) return;
+      setMicEnabled(true);
+    }
+    function setListening(on) {
+      if (listening === on || !provider?.ready) return;
+      listening = on;
+      provider.setTurnDetection(on ? (VAD_PROFILES[lastVadProfile] || VAD_PROFILES.eager) : null);
+    }
+    function interruptAgentSpeech({ clearInput = false } = {}) {
+      if (!provider?.ready) return false;
+      awaitingNudge = false; nudgeActive = false; nudgePlaybackPending = false;
+      provider.interrupt({ clearInput });
+      return true;
+    }
+    function fireNudge(d) {
+      if (awaitingNudge || nudgeActive || !listening) return;
+      log("tyto.nudge.trip", { cause: `${d.label}=${d.value.toFixed(2)}` });
+      $("react-pill").textContent = `${d.label} ${d.value.toFixed(2)}`;
+      $("react-val").textContent = `Just nudged: "${d.text}"`;
+      $banner.textContent = `Tyto: ${d.label} = ${d.value.toFixed(2)}, nudging the agent`;
+      $banner.classList.add("visible"); setTimeout(() => $banner.classList.remove("visible"), 6000);
+      if (!provider?.ready) return;
+      if (provider.managesTurnTaking) {
+        // ElevenLabs runs turn-taking server-side and has no verbatim interrupt,
+        // so we just hand it the nudge as a contextual hint and let it decide how
+        // and when to say it. No mic-mute / await-nudge dance (which depends on a
+        // trackable nudge response the EL SDK does not expose).
+        provider.nudge(d.text);
+        log("tyto.nudge.dispatch", { text: d.text });
+        return;
+      }
+      // Cut the user's audio and the agent's output, then nudge immediately.
+      setMicEnabled(false); setListening(false);
+      syncWorkerGate();
+      interruptAgentSpeech({ clearInput: true });
+      awaitingNudge = true;
+      provider.nudge(d.text);
+      log("tyto.nudge.dispatch", { text: d.text });
+    }
+    function resumeAfterNudge() {
+      nudgeActive = false; awaitingNudge = false; nudgePlaybackPending = false;
+      setListening(true); maybeUnmuteMic();
+      syncWorkerGate();
+      log("tyto.input.resumed", {});
+    }
+
+    // ── Connect / disconnect ──────────────────────────────────────────────────────
+    async function start() {
+      if (!KEYS.present) { openKeyGate(); return; }   // need both keys first
+      setStatus("connecting", "Connecting…"); buildCards();
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true, noiseSuppression: false, autoGainControl: false,
+          }
+        });
+        log("mic.constraints", micStream.getAudioTracks()[0].getSettings());
+
+        // ElevenLabs owns its own mic + playback, so `micStream` here is only
+        // for Tyto's tap. The agent must expose a client tool named
+        // "check_audio_quality" (no params); its implementation lives here.
+        const clientTools = {
+          check_audio_quality: async () => {
+            const result = audioQualitySnapshot();
+            log("tool.check_audio_quality", result);
+            return JSON.stringify(result);
+          },
+        };
+        provider = new ElevenLabsProvider(providerHandlers, { log });
+        await provider.connect({
+          agentId: KEYS.agentId,
+          instructions: BASE_INSTRUCTIONS,
+          firstMessage: FIRST_MESSAGE,
+          voiceId: EL_VOICE_ID || undefined,
+          clientTools,
+        });
+
+        await startTytoWorker();
+        await startTap(micStream);
+        connected = true; $mic.classList.add("live"); setStatus("live", "Live");
+        log("tyto.loading", { message: "WASM SDK + tyto-l-16khz loading in worker…" });
+      } catch (err) {
+        setStatus("error", "Error"); log("error", { message: String(err) }); stop();
+      }
+    }
+    function stop() {
+      connected = false; $mic.classList.remove("live");
+      listening = true; awaitingNudge = false; nudgeActive = false; nudgePlaybackPending = false;
+      agentSpeaking = false; agentAudioPlaying = false;
+      lastRoomState = ""; lastVadProfile = "eager"; lastMetrics = null;
+      clearSeries(); setTytoState(null);
+      if (tytoWorker) { try { tytoWorker.postMessage({ type: "stop" }); tytoWorker.terminate(); } catch { } tytoWorker = null; }
+      emaMetrics = null; envMonitor = null; workerScoring = true;
+      if (tapCtx) tapCtx.close().catch(() => { }); tapCtx = null;
+      if (provider) { provider.disconnect(); provider = null; }
+      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null }
+      if (!$status.className.includes("error")) setStatus("", "Disconnected");
+    }
+
+    // Live nudge-sensitivity control (Layer 3 · Reactive). Clamps, updates the
+    // running monitor, and reflects the value in the slider + label.
+    function setNudgeThreshold(v) {
+      nudgeThreshold = Math.min(NUDGE_THRESHOLD_MAX, Math.max(NUDGE_THRESHOLD_MIN, v));
+      if (envMonitor) envMonitor.threshold = nudgeThreshold;
+      const slider = $("nudge-th"), label = $("nudge-th-val"), mark = $("composite-marker");
+      if (slider) slider.value = nudgeThreshold.toFixed(2);
+      if (label) label.textContent = `≥ ${nudgeThreshold.toFixed(2)}`;
+      // Slide the "nudge line" on the composite bar to where it will fire.
+      if (mark) mark.style.left = (nudgeThreshold * 100).toFixed(1) + "%";
+    }
+    $("nudge-th").addEventListener("input", (e) => setNudgeThreshold(+e.target.value));
+
+    // ── Bring-your-own-keys gate ──────────────────────────────────────────────────
+    function reflectKeyState() {
+      const btn = $("keys-btn");
+      btn.textContent = KEYS.present ? "Keys ✓" : "Enter keys";
+      btn.classList.toggle("set", KEYS.present);
+    }
+    function openKeyGate() {
+      $("k-agent").value = KEYS.agentId;
+      $("k-license").value = KEYS.license;
+      $("k-err").textContent = "";
+      $("key-gate").classList.add("visible");
+      $("k-agent").focus();
+    }
+    function closeKeyGate() { $("key-gate").classList.remove("visible"); }
+    function saveKeys() {
+      const agentId = $("k-agent").value.trim(), license = $("k-license").value.trim();
+      if (!agentId || !license) { $("k-err").textContent = "An agent ID and your ai-coustics license are both required."; return; }
+      KEYS.set(agentId, license);
+      reflectKeyState();
+      closeKeyGate();
+    }
+    function clearKeys() {
+      KEYS.clear();
+      $("k-agent").value = ""; $("k-license").value = "";
+      reflectKeyState();
+    }
+    $("keys-btn").addEventListener("click", openKeyGate);
+    $("k-save").addEventListener("click", saveKeys);
+    $("k-clear").addEventListener("click", clearKeys);
+    $("key-gate").addEventListener("click", (e) => { if (e.target.id === "key-gate") closeKeyGate(); });
+    for (const id of ["k-agent", "k-license"]) {
+      $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") saveKeys(); });
+    }
+
+    $mic.addEventListener("click", () => connected ? stop() : start());
+    buildCards();
+    setNudgeThreshold(nudgeThreshold);
+    reflectKeyState();
+    if (!KEYS.present) openKeyGate();   // first-time visitors land on the key prompt
+    startSeriesLoop();
+  </script>
+</body>
+
+</html>
