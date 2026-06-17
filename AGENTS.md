@@ -57,6 +57,12 @@ worse) and six dimensions (`noise`, `speaker_reverb`, `speaker_loudness`,
   (mic capture, agent playback, render). Audio is relayed browser <-> backend
   <-> OpenAI; keys stay in the server env. The player (browser) owns
   `on_agent_audio`, reported back over the socket.
+- **examples/pipecat/** - the same browser UI on a Pipecat pipeline (FastAPI +
+  `SmallWebRTCTransport`, OpenAI Realtime speech-to-speech). `server.py` wires
+  the shared scorer/controller to `PipecatRealtimeProvider`; `index.html` is
+  copied from `examples/web` and `app.js` reuses its rendering and only swaps the
+  transport (WebRTC media + a data channel for UI messages). Audio plays in the
+  browser, so `on_agent_audio` is driven server-side by `BotStarted/StoppedSpeakingFrame`.
 
 ### Who owns "agent audible" (on_agent_audio)
 
@@ -70,6 +76,11 @@ a backend.
 This is the main extension point. To add ElevenLabs, LiveKit, a cascaded
 pipeline, etc., write one subclass of `VoiceProvider` (see
 [src/tyto_voice/provider.py](src/tyto_voice/provider.py)) and nothing else changes.
+[pipecat_provider.py](src/tyto_voice/pipecat_provider.py) is the worked example:
+it drives a Pipecat pipeline (OpenAI Realtime over WebRTC) behind the seam, taps
+the mic into the scorer with a small `FrameProcessor`, and turns pipeline frames
+into `Handlers` calls with a `BaseObserver`. Where Pipecat owns a concern, the
+gap is documented (see the README "Pipecat backend" section), not faked.
 
 1. Implement the commands: `connect`, `disconnect`, `set_instructions` (Aware),
    `set_turn_detection` (Tuned and the listen gate), `set_mic_enabled`,

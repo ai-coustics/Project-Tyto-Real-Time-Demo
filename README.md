@@ -19,6 +19,7 @@ Three things you can run:
 | Demo | What it shows | Needs |
 | --- | --- | --- |
 | [examples/web/server.py](examples/web/server.py) | The full demo with the browser UI, same as the reference. Tyto scoring, the agent, and the keys all run on the Python backend; the browser is a thin client. | ai-coustics key + OpenAI key |
+| [examples/pipecat/server.py](examples/pipecat/server.py) | The same browser demo, but the voice backend is a [Pipecat](https://pipecat.ai) pipeline (OpenAI Realtime speech-to-speech) reached over WebRTC instead of a hand-written WebSocket relay. Same UI, same three layers. | ai-coustics key + OpenAI key |
 | [examples/score_mic.py](examples/score_mic.py) | Live Tyto scoring of your mic in the terminal, with the three layer decisions printed. No agent. | ai-coustics key + a mic |
 | [examples/voice_agent.py](examples/voice_agent.py) | The full agent in the terminal (no UI), for headless or scripting use. | ai-coustics key + OpenAI key + headphones |
 
@@ -43,6 +44,10 @@ split by job, mirroring the commented sections of the browser reference:
 - `openai_realtime.py` - `OpenAIRealtimeProvider`, the OpenAI Realtime WebSocket
   backend. Audio playback is delegated to a sink so the same provider drives a
   local speaker or a browser.
+- `pipecat_provider.py` - `PipecatRealtimeProvider`, the same OpenAI Realtime
+  backend but driven through a [Pipecat](https://pipecat.ai) pipeline with a
+  WebRTC transport. A second `VoiceProvider` subclass, written without touching
+  the controller or decision layers - the provider seam in action.
 - `audio.py` - `SounddeviceSink`, local speaker playback for the terminal agent.
 
 ## Run it
@@ -59,6 +64,10 @@ cp .env.example .env    # then edit AIC_SDK_LICENSE and OPENAI_API_KEY
 # the full demo with the browser UI (start here)
 uv pip install -e ".[web]"
 uv run examples/web/server.py        # then open http://localhost:8080
+
+# or: the same browser demo on a Pipecat pipeline (OpenAI Realtime over WebRTC)
+uv pip install -e ".[pipecat]"
+uv run examples/pipecat/server.py    # then open http://localhost:8080
 
 # or: live mic scoring in the terminal, no agent
 uv pip install -e .
@@ -104,6 +113,34 @@ All three, server-side, with the same tuned thresholds as the browser:
 
 The `check_audio_quality` tool is wired as an OpenAI function tool, so the user
 can ask "how do I sound?" at any time.
+
+### The Pipecat backend
+
+`examples/pipecat` is the same demo on a [Pipecat](https://pipecat.ai) pipeline.
+It exists to show the provider seam: the scorer, decision layer, and controller
+(and their tests) are reused unchanged; only a new `VoiceProvider` subclass,
+[pipecat_provider.py](src/tyto_voice/pipecat_provider.py), is added. The pipeline
+per connection is `SmallWebRTCTransport.input -> TytoAudioTap (feeds the scorer)
+-> OpenAIRealtimeLLMService -> SmallWebRTCTransport.output`, and the three layers
+map to the same OpenAI Realtime client events as the raw provider (instructions
+and turn detection via `session.update`, the nudge via `response.create`).
+
+Because Pipecat owns the transport and the frame flow, three things differ from
+the raw-websocket provider, documented rather than faked:
+
+- Agent audio is played to the browser by the transport, so `on_agent_audio` is
+  driven by `Bot{Started,Stopped}SpeakingFrame` (a server-side estimate) instead
+  of browser-reported audibility.
+- `check_audio_quality` is answered by a registered Pipecat function handler, so
+  the controller's `on_tool_call` / `send_tool_result` path is unused here.
+- The opening greeting is kicked off by `request_response` queuing an
+  `LLMRunFrame` (the context aggregator emits its context on that frame, and the
+  realtime service responds to it), rather than by a raw `response.create`.
+
+The browser client ([examples/pipecat/app.js](examples/pipecat/app.js)) reuses
+the websocket demo's UI verbatim and only swaps the transport: WebRTC media for
+audio (so the browser's echo cancellation and jitter buffer do the work) and a
+WebRTC data channel for the score / layer / transcript / log messages.
 
 ### Limitations and notes
 

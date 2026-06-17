@@ -16,6 +16,14 @@ dependencies = [
 agent = ["websockets>=13"]
 # The browser demo adds the web server.
 web = ["websockets>=13", "aiohttp>=3.9"]
+# The Pipecat browser demo: a Pipecat pipeline (OpenAI Realtime) over WebRTC.
+# pipecat-ai 1.4 requires Python >=3.11, so it is gated by a marker; the rest of
+# the project still supports 3.10. Install this extra on Python 3.11+.
+pipecat = [
+    "pipecat-ai[openai,webrtc]>=1.4; python_version >= '3.11'",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]
 # Everything, plus the test runner.
 dev = ["websockets>=13", "aiohttp>=3.9", "pytest>=8"]
 
